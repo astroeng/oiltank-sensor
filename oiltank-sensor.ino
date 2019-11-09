@@ -21,6 +21,8 @@ const int MQTT_PORT = 8883;
 const char MQTT_SUB_TOPIC[] = "$aws/things/" THINGNAME "/shadow/update";
 const char MQTT_PUB_TOPIC[] = "$aws/things/" THINGNAME "/stream/update";
 
+static const unsigned long message_interval = 10*60*1000;
+
 WiFiClientSecure netSecure;
 
 MQTT_Manager aws_iot(THINGNAME, MQTT_HOST, MQTT_PORT, cacert, client_cert, privkey);
@@ -42,11 +44,11 @@ void sendData(unsigned long currentTime, double distance)
   char shadow[measureJson(root) + 1];
   serializeJson(root, shadow, sizeof(shadow));
 
-  Serial.println(shadow);
+  DEBUG(Serial.println(shadow));
 
   if (!aws_iot.publish(MQTT_PUB_TOPIC, shadow, false, 0))
   {
-    Serial.println(aws_iot.lastError());
+    DEBUG(Serial.println(aws_iot.lastError()));
   }
 }
 
@@ -68,17 +70,17 @@ bool checkMQTT()
   {
     if(aws_iot.connect())
     {
-      Serial.println("AWS-IOT Connected");
+      DEBUG(Serial.println("AWS-IOT Connected"));
       return true;
     }
     else
     {
       char buffer[128];
-      Serial.println("AWS-IOT Connection Failure");
-      Serial.println(String(aws_iot.returnCode()) + " " +
+      DEBUG(Serial.println("AWS-IOT Connection Failure"));
+      DEBUG(Serial.println(String(aws_iot.returnCode()) + " " +
                      String(aws_iot.lastError()) + " " +
-                     String(netSecure.getLastSSLError(buffer, 127)));
-      Serial.println(buffer);
+                     String(netSecure.getLastSSLError(buffer, 127))));
+      DEBUG(Serial.println(buffer));
 
     }
     return false;
@@ -88,13 +90,20 @@ bool checkMQTT()
 
 void checkWifi()
 {
+  unsigned long stuck_counter = 0;
   int state = 1;
   while (WiFi.status() != WL_CONNECTED)
   {
     // During the wait blink the status LED rapidly.
     digitalWrite(STATUS_LED, state);
     state ^= 1;
-    delay(100);
+    delay(500);
+    DEBUG(Serial.print("."));
+    stuck_counter++;
+    if (stuck_counter > 12000) // 20 Minutes with a 100ms Delay
+    {
+      ESP.restart();
+    }
   }
 }
 
@@ -115,32 +124,33 @@ void setup_serial()
 
 // Dumb hack to get around std::bind issue/misunderstanding.
 
-void tankISR()
+void ICACHE_RAM_ATTR tankISR()
 {
   tank_sensor.pulseISR();
 }
 
 void msgHandler(String& topic, String& payload)
 {
-  Serial.println(topic + " " + payload);
+  DEBUG(Serial.println(topic + " " + payload));
   aws_iot.msgHandler(topic, payload);
 }
 
 void printPayload(String& payload)
 {
-  Serial.println(payload);
+  DEBUG(Serial.println(payload));
 }
 
 void setup()
 {
   DEBUG(setup_serial());
-  Serial.println("Setup - Started " + String(millis()));
+  DEBUG(Serial.println("Setup - Started " + String(millis())));
 
   pinMode(STATUS_LED, OUTPUT);
 
   setupWifi();
 
   timeClient.begin();
+
   checkTime();
 
   tank_sensor.begin(tankISR);
@@ -150,12 +160,11 @@ void setup()
 
   checkMQTT();
 
-  Serial.println("Setup - Complete " + String(millis()));
+  DEBUG(Serial.println("Setup - Complete " + String(millis())));
 }
 
 void loop()
 {
-
   // Update time on the device.
   checkTime();
 
@@ -167,11 +176,11 @@ void loop()
   if (checkMQTT())
   {
     aws_iot.loop();
-    if (millis() - lastMillis > 10*60*1000)
+    if ((lastMillis + message_interval) < millis())
     {
-      Serial.println("AWS - IOT " + String(millis()));
+      DEBUG(Serial.println("AWS - IOT " + String(millis())));
       digitalWrite(STATUS_LED, !digitalRead(STATUS_LED));
-      lastMillis += 10*60*1000;
+      lastMillis += message_interval;
       sendData(timeClient.getEpochTime(), tank_sensor.getDistance());
     }
   }
